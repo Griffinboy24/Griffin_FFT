@@ -45,12 +45,12 @@ public:
     // Lower values (e.g., 0.5) will be more lenient (retain more peaks),
     // Higher values (e.g., 2.0) will be more aggressive.
     //------------------------------------------------------------------------------
-    static constexpr float CULLING_LENIENCY = 0.5f;
+    static constexpr float CULLING_LENIENCY = 0.3f;
 
     //==============================================================================
     // FFT / Overlap / Window Settings
     //==============================================================================
-    static constexpr int fftOrder = 11;              // 2^11 = 2048
+    static constexpr int fftOrder = 12;              // 2^11 = 2048
     static constexpr int fftSize = 1 << fftOrder;      // 2048 samples per frame
     static constexpr int overlap = 4;                  // 75% overlap
     static constexpr int hopSize = fftSize / overlap;  // 512 samples hop
