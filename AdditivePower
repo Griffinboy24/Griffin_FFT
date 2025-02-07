@@ -19,20 +19,34 @@
 // The FFT is performed with high resolution (via zero-padding) and nearly all
 // peaks are detected using quadratic interpolation. Then, a density-balancing
 // stage divides the spectrum into three fixed bands (low, mid, high) and prunes
-// peaks per band using fixed maximums. Global greedy tracking then links peaks
-// into continuous trajectories ("snakes") from the very first frame of appearance,
-// so that rising partials are captured smoothly. An importance score is computed
-// for each trajectory (with a slight boost for frequencies above 250 Hz) and only
-// the top "maxPartials" trajectories are retained. These tracked partials are stored
-// in a dedicated data structure (Trajectory) for later processing. Finally, each
-// trajectory's (smoothed) amplitude and frequency envelopes are used for re-synthesis
-// via linear interpolation with continuous phase integration and minimal fades
-// (approximately 5 ms) at its boundaries. The final output is normalized to match the
-// RMS of the original signal.
-//------------------------------------------------------------------------------ 
+// peaks per band using fixed maximums (in the low band, maxLow is reduced to 2).
+// Global greedy tracking then links peaks into continuous trajectories ("snakes")
+// from the very first frame of appearance, so that rising partials are captured
+// smoothly. An importance score is computed for each trajectory (with a slight boost
+// for frequencies above 250 Hz) and only the top "maxPartials" trajectories are retained.
+// These tracked partials are stored in a dedicated data structure (Trajectory) for
+// later processing. Finally, each trajectory's (smoothed) amplitude and frequency
+// envelopes are used for re-synthesis via linear interpolation with continuous phase
+// integration and minimal fades (~5 ms) at its boundaries. The final output is then
+// normalized to match the RMS level of the original signal.
+//
+// The parameter maxPartials (ranging from 3 to 200) is externally controlled and
+// determines the maximum number of simultaneous partials to render.
+//
+// An additional constant, CULLING_LENIENCY, has been introduced to scale the
+// effective threshold used for culling peaks. Adjust this constant to control
+// the leniency of culling (lower values are more lenient, higher values cull more).
+//------------------------------------------------------------------------------
 class GriffinFFT_UL
 {
 public:
+    //------------------------------------------------------------------------------
+    // Constant for culling leniency.
+    // Lower values (e.g., 0.5) will be more lenient (retain more peaks),
+    // Higher values (e.g., 2.0) will be more aggressive.
+    //------------------------------------------------------------------------------
+    static constexpr float CULLING_LENIENCY = 0.5f;
+
     //==============================================================================
     // FFT / Overlap / Window Settings
     //==============================================================================
@@ -175,7 +189,7 @@ public:
     }
 
     // Top-level offline function.
-    // This version now normalizes the final output to match the RMS level of the input.
+    // This version normalizes the final output to match the RMS level of the input.
     inline std::vector<float> processOfflineBufferWithSTFT(const float* inData, int numSamples, bool bypassed)
     {
         if (numSamples <= 0)
@@ -194,7 +208,7 @@ public:
                 // Global tracking with density balancing.
                 // Allow partials to persist up to 86 frames (~1 sec at 44.1 kHz, hop=512)
                 // and use a gentle decayFactor of 0.99.
-                // The maxPartials parameter now determines the maximum number of trajectories to retain.
+                // The maxPartials parameter determines the maximum number of trajectories to retain.
                 out = stftApplyAdditiveResynthesis(frames, additivePeakThreshold,
                     0.5f * additivePeakThreshold, 86, 0.99f,
                     maxPartials, numSamples);
@@ -207,17 +221,13 @@ public:
         // Compute RMS of original input.
         float origRMS = 0.0f;
         for (int i = 0; i < numSamples; i++)
-        {
             origRMS += inData[i] * inData[i];
-        }
         origRMS = std::sqrt(origRMS / numSamples);
 
         // Compute RMS of synthesized output.
         float synthRMS = 0.0f;
         for (float v : out)
-        {
             synthRMS += v * v;
-        }
         synthRMS = std::sqrt(synthRMS / out.size());
 
         // Scale the synthesized output to match the RMS of the input.
@@ -386,13 +396,15 @@ private:
     //==============================================================================
     // Advanced Additive Re-Synthesis with Global Tracking and Density Balancing.
     //
-    // This function performs global tracking of partial trajectories. It first detects
-    // peaks using quadratic interpolation, then prunes each frame's peaks by dividing the
-    // spectrum into three bands (low, mid, high) and limiting the number of peaks per band.
-    // Next, a greedy tracking algorithm links peaks across frames to form trajectories
-    // ("snakes"). Trajectories are scored using a frequency-weighted sum (boosting high
-    // frequencies slightly), and only the top maxPartials trajectories are retained.
-    // The amplitude envelope of each trajectory is smoothed with a moving average.
+    // This function performs global tracking of partial trajectories.
+    // It first detects peaks using quadratic interpolation, then prunes each frame's peaks
+    // by dividing the spectrum into three bands (low, mid, high) and limiting the number of
+    // peaks per band using fixed maximums (for lows, the maximum is set lower to avoid extra
+    // low harmonics). Next, a greedy tracking algorithm links peaks across frames to form
+    // trajectories ("snakes"). To favor early tracking, a trajectory is started at the first
+    // frame in which a peak appears. Each trajectory is then scored using a frequency-weighted
+    // sum (boosting high frequencies slightly) and only the top maxPartials trajectories are
+    // retained. The amplitude envelope of each trajectory is smoothed with a moving average.
     // Finally, each trajectory is re-synthesized by linearly interpolating its frequency and
     // amplitude envelopes with continuous phase integration and a minimal fade (~5 ms) at its
     // boundaries. The output is then normalized (via RMS matching to the original input).
@@ -420,12 +432,12 @@ private:
                 float p = 0.5f * (alpha - gamma) / (alpha - 2.0f * beta + gamma);
                 float refinedBin = b + p;
                 float freq = refinedBin * currentSampleRate / paddedSize;
-                // For frequencies below 250 Hz, raise threshold; above 250 Hz, lower to allow early tracking.
+                // For frequencies below 250 Hz, raise threshold to avoid extra low harmonics.
                 float effThresh = startThresh * maxAmp;
                 if (freq < 250.0f)
-                    effThresh *= 1.5f;
+                    effThresh *= 2.0f * CULLING_LENIENCY;
                 else
-                    effThresh *= 0.8f;
+                    effThresh *= 0.8f * CULLING_LENIENCY; // be more lenient above 250 Hz
                 if (beta < effThresh)
                     continue;
                 if (beta >= sf.amplitude[b - 1] && beta >= sf.amplitude[b + 1])
@@ -448,9 +460,9 @@ private:
                 else
                     high.push_back(pk);
             }
-            int maxLow = 4;
-            int maxMid = 6;
-            int maxHigh = 10;
+            int maxLow = 2;   // fixed maximum in lows
+            int maxMid = 6;   // fixed maximum in mids
+            int maxHigh = 10; // fixed maximum in highs
             auto prune = [&](std::vector<Peak>& band, int maxCount) {
                 if (band.size() <= (size_t)maxCount)
                     return;
