@@ -1,3 +1,6 @@
+// ------------------------------
+// Griffin_FFT_Sampler.h
+// ------------------------------
 #pragma once
 #include <JuceHeader.h>
 #include <array>
@@ -74,7 +77,7 @@ namespace project
         //--------------------------------------------------------------------------------
         // FFT Processor
         //--------------------------------------------------------------------------------
-        GriffinFFT_UL fftInstance; // All advanced logic resides in here
+        GriffinFFT_UL fftInstance; // Our new dual-resolution FFT engine.
 
         //--------------------------------------------------------------------------------
         // Parameters
@@ -95,8 +98,8 @@ namespace project
 
             fftInstance.reset();
             fftInstance.setSampleRate((float)sampleRate);
-            // Set default additive peak threshold (default = 0.5)
-            fftInstance.setAdditivePeakThreshold(0.5f);
+            // Set default maximum partials (default is 60).
+            fftInstance.setMaxPartials(60);
         }
 
         //--------------------------------------------------------------------------------
@@ -286,6 +289,7 @@ namespace project
                 data.add(std::move(p));
             }
             {
+                // Parameter 3: Partial Cap as a normalized slider [0,1] mapped to [3,300]
                 parameter::data p("Partial Cap", { 0.0, 1.0, 0.001 });
                 registerCallback<3>(p);
                 p.setDefaultValue(0.0);
@@ -319,8 +323,9 @@ namespace project
             }
             else if constexpr (P == 3)
             {
-                // Set additive peak detection threshold
-                fftInstance.setAdditivePeakThreshold((float)v);
+                // Map v in [0,1] to integer in [3,300] for max partials.
+                int newMax = static_cast<int>(v * (300 - 3) + 3);
+                fftInstance.setMaxPartials(newMax);
             }
             else if constexpr (P == 4)
             {
@@ -336,8 +341,6 @@ namespace project
 
         //--------------------------------------------------------------------------------
         // processSampleBufferWithFFT
-        //   Passes the entire sample buffer into the FFT engine.
-        //   The FFT engine performs offline STFT-based processing.
         //--------------------------------------------------------------------------------
         inline void processSampleBufferWithFFT()
         {
@@ -349,16 +352,12 @@ namespace project
             for (int ch = 0; ch < numCh; ++ch)
             {
                 const float* inData = sampleBuffer.getReadPointer(ch);
-                // When Process FFT is activated, use the offline pipeline.
                 auto processed = fftInstance.processOfflineBufferWithSTFT(inData, numSamples, false);
-
-                // Copy back
                 float* outPtr = sampleBuffer.getWritePointer(ch);
                 int copyLen = std::min((int)processed.size(), numSamples);
                 std::copy(processed.begin(), processed.begin() + copyLen, outPtr);
             }
 
-            // Refresh pointers
             int newCh = sampleBuffer.getNumChannels();
             sample[0] = sampleBuffer.getReadPointer(0);
             sample[1] = (newCh > 1 ? sampleBuffer.getReadPointer(1) : sample[0]);
