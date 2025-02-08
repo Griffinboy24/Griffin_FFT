@@ -1,0 +1,449 @@
+#pragma once
+#include <JuceHeader.h>
+#include <array>
+#include <vector>
+#include <complex>
+#include <functional>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+/*
+  GriffinFFT_UL – A flexible FFT engine with:
+    1) Real-time overlap–add usage (processSample, processBlock).
+    2) A simple "processEntireBuffer" one-shot approach.
+    3) An advanced STFT pipeline for offline processing, supporting
+       multi-stage or time-varying modifications on the entire signal.
+    4) A user-definable transform callback for offline usage.
+
+  The sampler node can simply pass the entire buffer here for offline
+  spectral processing, while the actual manipulation of amplitude/phase
+  is contained in this file (keeping the sampler code minimal).
+*/
+
+class GriffinFFT_UL
+{
+public:
+    //==============================================================================
+    // FFT / Overlap / Window Settings
+    //==============================================================================
+    static constexpr int fftOrder = 11;  // 2^11 = 2048
+    static constexpr int fftSize = 1 << fftOrder;     // 2048
+    static constexpr int overlap = 4;                 // 75% overlap
+    static constexpr int hopSize = fftSize / overlap; // 512
+    static constexpr int zeroPadOrder = fftOrder + 1;      // 2^(11+1) = 4096
+    static constexpr int paddedSize = 1 << zeroPadOrder; // 4096
+    static constexpr int paddedNumBins = paddedSize / 2 + 1;
+
+    // A correction factor for perfect overlap–add with Hann^2
+    static constexpr float windowCorrection = 2.0f / 3.0f;
+
+    //==============================================================================
+    // Public Parameter Setters
+    //==============================================================================
+    inline void setSampleRate(float sr) { currentSampleRate = sr; }
+    inline void setLowpassCutoff(float freqHz) { lowpassCutoffFrequency = freqHz; }
+
+    //==============================================================================
+    // Constructor
+    //==============================================================================
+    GriffinFFT_UL()
+        : fft(fftOrder),
+        fftPadded(zeroPadOrder),
+        currentSampleRate(44100.0f),
+        lowpassCutoffFrequency(5000.0f),
+        pos(0),
+        count(0)
+    {
+        // Prepare window tables
+        windowTable.resize(fftSize);
+        compositeWindow.resize(fftSize);
+
+        for (int i = 0; i < fftSize; ++i)
+            windowTable[i] = 0.5f * (1.0f - std::cos((2.0f * float(3.14159265358979323846) * i) / (fftSize - 1)));
+
+        for (int i = 0; i < fftSize; ++i)
+            compositeWindow[i] = windowTable[i] * windowTable[i] * windowCorrection;
+
+        // Clear the circular buffers
+        inputFifo.fill(0.0f);
+        outputFifo.fill(0.0f);
+
+        // Temporary FFT buffers
+        fftData.resize(fftSize * 2, 0.0f);
+        paddedData.resize(paddedSize * 2, 0.0f);
+    }
+
+    //==============================================================================
+    // reset()
+    //==============================================================================
+    inline void reset()
+    {
+        count = 0;
+        pos = 0;
+        inputFifo.fill(0.0f);
+        outputFifo.fill(0.0f);
+    }
+
+    //==============================================================================
+    // 1) Real-time Overlap–Add Usage
+    //==============================================================================
+    inline void processBlock(const float* inBlock, float* outBlock, int numSamples, bool bypassed)
+    {
+        int i = 0;
+        while (i < numSamples)
+        {
+            int localPos = pos;
+            int samplesUntilEnd = fftSize - localPos;
+            int samplesUntilFFT = hopSize - count;
+            int chunk = std::min({ numSamples - i, samplesUntilEnd, samplesUntilFFT });
+
+            // Copy in
+            std::copy(inBlock + i, inBlock + i + chunk, inputFifo.begin() + localPos);
+            // Copy out
+            std::copy(outputFifo.begin() + localPos, outputFifo.begin() + localPos + chunk, outBlock + i);
+
+            // Zero the used portion
+            std::fill(outputFifo.begin() + localPos, outputFifo.begin() + localPos + chunk, 0.0f);
+
+            localPos = (localPos + chunk) & (fftSize - 1);
+            pos = localPos;
+            count += chunk;
+            i += chunk;
+
+            // If we've collected enough samples, process a frame
+            if (count >= hopSize)
+            {
+                count = 0;
+                processFrame(bypassed);
+            }
+        }
+    }
+
+    inline float processSample(float sample, bool bypassed)
+    {
+        float outSample = outputFifo[pos];
+        inputFifo[pos] = sample;
+        outputFifo[pos] = 0.0f;
+
+        pos = (pos + 1) & (fftSize - 1);
+        count = (count + 1) % hopSize;
+        if (count == 0)
+            processFrame(bypassed);
+
+        return outSample;
+    }
+
+    inline std::vector<float> flushRemaining(bool bypassed)
+    {
+        std::vector<float> flushed;
+        flushed.reserve(fftSize);
+        for (int i = 0; i < fftSize; ++i)
+            flushed.push_back(processSample(0.0f, bypassed));
+        return flushed;
+    }
+
+    //==============================================================================
+    // 2) Simple One-Shot Processing (no separate STFT frames)
+    //==============================================================================
+    inline std::vector<float> processEntireBuffer(const float* inData, int numSamples, bool bypassed)
+    {
+        reset();
+        std::vector<float> out(numSamples + fftSize, 0.0f);
+        processBlock(inData, out.data(), numSamples, bypassed);
+        auto flushed = flushRemaining(bypassed);
+        out.insert(out.end(), flushed.begin(), flushed.end());
+
+        // Remove initial delay
+        const int delay = fftSize - hopSize; // e.g. 1536
+        const int totalOut = (int)out.size();
+        const int trimmedLength = std::min(totalOut - delay, numSamples);
+
+        std::vector<float> trimmed(trimmedLength, 0.0f);
+        std::copy(out.begin() + delay, out.begin() + delay + trimmedLength, trimmed.begin());
+        return trimmed;
+    }
+
+    //==============================================================================
+    // 3) Offline STFT Workflow (multi-stage / time-varying friendly)
+    //==============================================================================
+    // We'll define a struct to hold amplitude & phase for each bin.
+    struct SpectralFrame
+    {
+        std::vector<float> amplitude;
+        std::vector<float> phase;
+    };
+
+    // Optional user transform callback for offline STFT
+    // (You can set this to do multi-stage or time-varying modifications in one place).
+    std::function<void(std::vector<SpectralFrame>& frames)> offlineTransformCallback;
+
+    // setOfflineTransformCallback: user can set a function that modifies the entire
+    // set of STFT frames (amplitude/phase). If no callback is set, we'll do a default
+    // pass-through or built-in example, depending on "bypassed."
+    inline void setOfflineTransformCallback(std::function<void(std::vector<SpectralFrame>&)> cb)
+    {
+        offlineTransformCallback = cb;
+    }
+
+    // The top-level offline function that the sampler can call: it does:
+    //   1) Analyze the entire buffer -> frames
+    //   2) If not bypassed, calls either the user callback or a fallback process
+    //   3) Resynthesizes and returns the resulting time-domain samples
+    inline std::vector<float> processOfflineBufferWithSTFT(const float* inData, int numSamples, bool bypassed)
+    {
+        if (numSamples <= 0)
+            return {};
+
+        // 1) Analyze
+        auto frames = stftAnalyzeFullBuffer(inData, numSamples);
+
+        // 2) If not bypassed, apply either user callback or default spectral process
+        if (!bypassed)
+        {
+            if (offlineTransformCallback)
+            {
+                // user-provided transformations
+                offlineTransformCallback(frames);
+            }
+            else
+            {
+                // fallback: maybe do a basic example or do nothing.
+                // We'll show a trivial "lowpass" example if desired:
+                stftApplyLowpass(frames, lowpassCutoffFrequency);
+            }
+        }
+
+        // 3) Resynthesize
+        auto out = stftSynthesizeFullBuffer(frames, numSamples);
+        return out;
+    }
+
+private:
+    //==============================================================================
+    // Internal JUCE FFT objects
+    //==============================================================================
+    juce::dsp::FFT fft;        // for 2048 frames
+    juce::dsp::FFT fftPadded;  // for 4096 frames (zero-pad)
+
+    //==============================================================================
+    // Windowing
+    //==============================================================================
+    std::vector<float> windowTable;     // Hann
+    std::vector<float> compositeWindow; // Hann^2 w/ correction
+
+    //==============================================================================
+    // Overlap–Add Circular Buffers
+    //==============================================================================
+    std::array<float, fftSize> inputFifo{};
+    std::array<float, fftSize> outputFifo{};
+
+    //==============================================================================
+    // Temporary Buffers
+    //==============================================================================
+    std::vector<float> fftData;
+    std::vector<float> paddedData;
+
+    //==============================================================================
+    // Internal State
+    //==============================================================================
+    int   pos;
+    int   count;
+    float currentSampleRate;
+    float lowpassCutoffFrequency;
+
+    //==============================================================================
+    // processFrame: used by real-time overlap–add
+    //==============================================================================
+    inline void processFrame(bool bypassed)
+    {
+        float* fptr = fftData.data();
+        reassembleFFTFrame(fptr);
+
+        // zero-pad
+        std::memcpy(paddedData.data(), fptr, fftSize * sizeof(float));
+        std::fill(paddedData.begin() + fftSize, paddedData.end(), 0.0f);
+
+        // Hann window
+        juce::FloatVectorOperations::multiply(paddedData.data(), windowTable.data(), fftSize);
+
+        if (!bypassed)
+        {
+            fftPadded.performRealOnlyForwardTransform(paddedData.data(), true);
+            // Example built-in real-time spectral operation
+            processSpectrumRealtime(paddedData.data(), paddedNumBins);
+            fftPadded.performRealOnlyInverseTransform(paddedData.data());
+        }
+
+        // Overlap–add
+        juce::FloatVectorOperations::multiply(paddedData.data(), compositeWindow.data(), fftSize);
+
+        if (pos > 0)
+            juce::FloatVectorOperations::add(outputFifo.data(),
+                paddedData.data() + fftSize - pos,
+                pos);
+
+        int remaining = fftSize - pos;
+        if (remaining > 0)
+            juce::FloatVectorOperations::add(outputFifo.data() + pos,
+                paddedData.data(),
+                remaining);
+    }
+
+    // For real-time usage, a simple lowpass example
+    inline void processSpectrumRealtime(float* data, int nBins)
+    {
+        auto* cdata = reinterpret_cast<std::complex<float>*>(data);
+        int   cutoffBin = frequencyToBin(lowpassCutoffFrequency);
+
+        for (int i = 0; i < nBins; ++i)
+        {
+            float mag = std::abs(cdata[i]);
+            float phase = std::arg(cdata[i]);
+
+            if (i > cutoffBin)
+                mag = 0.0f;
+
+            cdata[i] = std::polar(mag, phase);
+        }
+    }
+
+    // Helper: reassemble contiguous frame from circular input
+    inline void reassembleFFTFrame(float* dest)
+    {
+        for (int i = 0; i < fftSize; ++i)
+            dest[i] = inputFifo[(pos + i) & (fftSize - 1)];
+    }
+
+    // frequencyToBin: used for real-time usage
+    inline int frequencyToBin(float frequency) const
+    {
+        int bin = int((frequency * paddedSize) / currentSampleRate + 0.5f);
+        if (bin >= paddedNumBins) bin = paddedNumBins - 1;
+        if (bin < 0) bin = 0;
+        return bin;
+    }
+
+    //==============================================================================
+    // Offline STFT Implementation
+    //==============================================================================
+    // 1) stftAnalyzeFullBuffer
+    inline std::vector<SpectralFrame> stftAnalyzeFullBuffer(const float* inData, int numSamples)
+    {
+        const int totalFrames = (numSamples + hopSize - 1) / hopSize; // ceil
+        std::vector<SpectralFrame> frames;
+        frames.reserve((size_t)totalFrames);
+
+        std::vector<float> frameBuffer(fftSize, 0.0f);
+
+        for (int frameIndex = 0; frameIndex < totalFrames; ++frameIndex)
+        {
+            int frameStart = frameIndex * hopSize;
+            int countToCopy = std::min(fftSize, numSamples - frameStart);
+            if (countToCopy < 0) countToCopy = 0;
+
+            // gather time data
+            std::fill(frameBuffer.begin(), frameBuffer.end(), 0.0f);
+            if (countToCopy > 0)
+                std::copy(inData + frameStart, inData + frameStart + countToCopy, frameBuffer.begin());
+
+            // window + zero-pad
+            std::fill(paddedData.begin(), paddedData.end(), 0.0f);
+            for (int i = 0; i < fftSize; ++i)
+                paddedData[i] = windowTable[i] * frameBuffer[i];
+
+            // forward transform
+            fftPadded.performRealOnlyForwardTransform(paddedData.data(), true);
+
+            // store amplitude/phase
+            SpectralFrame sf;
+            sf.amplitude.resize(paddedNumBins);
+            sf.phase.resize(paddedNumBins);
+
+            auto* cdata = reinterpret_cast<std::complex<float>*>(paddedData.data());
+            for (int b = 0; b < paddedNumBins; ++b)
+            {
+                float mag = std::abs(cdata[b]);
+                float ph = std::arg(cdata[b]);
+                sf.amplitude[b] = mag;
+                sf.phase[b] = ph;
+            }
+
+            frames.push_back(std::move(sf));
+        }
+
+        return frames;
+    }
+
+    // 2) stftSynthesizeFullBuffer
+    inline std::vector<float> stftSynthesizeFullBuffer(const std::vector<SpectralFrame>& frames,
+        int originalLength)
+    {
+        if (frames.empty())
+            return {};
+
+        const int totalFrames = (int)frames.size();
+        std::vector<float> out;
+        out.resize((totalFrames - 1) * hopSize + fftSize + 8, 0.0f);
+
+        for (int frameIndex = 0; frameIndex < totalFrames; ++frameIndex)
+        {
+            // re-create complex bins
+            std::fill(paddedData.begin(), paddedData.end(), 0.0f);
+
+            const auto& sf = frames[frameIndex];
+            auto* cdata = reinterpret_cast<std::complex<float>*>(paddedData.data());
+            int         nbins = std::min<int>(paddedNumBins, (int)sf.amplitude.size());
+
+            for (int b = 0; b < nbins; ++b)
+            {
+                float mag = sf.amplitude[b];
+                float ph = sf.phase[b];
+                cdata[b] = std::polar(mag, ph);
+            }
+
+            // inverse
+            fftPadded.performRealOnlyInverseTransform(paddedData.data());
+
+            // multiply Hann^2
+            for (int i = 0; i < fftSize; ++i)
+                paddedData[i] *= compositeWindow[i];
+
+            // overlap–add
+            int outPos = frameIndex * hopSize;
+            for (int i = 0; i < fftSize; ++i)
+                out[outPos + i] += paddedData[i];
+        }
+
+        // Optionally trim
+        if (originalLength > 0 && originalLength < (int)out.size())
+            out.resize(originalLength);
+
+        return out;
+    }
+
+    // 3) stftApplyLowpass
+    //    Example “built-in” offline transform that zeroes bins above cutoff
+    inline void stftApplyLowpass(std::vector<SpectralFrame>& frames, float cutoffHz)
+    {
+        // Convert freq -> bin index using paddedSize
+        int cutoffBin = int((cutoffHz * paddedSize) / currentSampleRate + 0.5f);
+        if (cutoffBin < 0) cutoffBin = 0;
+        if (cutoffBin > paddedNumBins - 1)
+            cutoffBin = paddedNumBins - 1;
+
+        // For each frame / bin
+        for (auto& frame : frames)
+        {
+            int nbins = (int)frame.amplitude.size();
+            for (int b = 0; b < nbins; ++b)
+            {
+                if (b > cutoffBin)
+                {
+                    frame.amplitude[b] = 0.0f;
+                    // keep existing phase or zero, but amplitude=0 is enough
+                }
+            }
+        }
+    }
+};
