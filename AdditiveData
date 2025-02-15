@@ -1,0 +1,26 @@
+#pragma once
+#include <vector>
+
+// Define the Partial struct in a dedicated header.
+// Also define the AdditiveSettings struct so both "AdditiveEffects.h"
+// and "GriffinFFT_UL.h" can use it without circular references.
+
+struct Partial
+{
+    std::vector<float> times;
+    std::vector<float> freqs;
+    std::vector<float> amps;
+    std::vector<float> phases;
+    std::vector<float> envelope;
+    float spatialPosition = 0.0f;
+};
+
+struct AdditiveSettings
+{
+    bool enableTimeStretch = true;
+    bool enableRandomPan   = true;
+    bool enableLfoMod      = true;
+
+    float timeStretchFactor = 2.0f; // For time stretch
+    float lfoRateHz         = 0.5f; // For LFO effect
+};
