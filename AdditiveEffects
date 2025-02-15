@@ -1,10 +1,15 @@
 #pragma once
+
 #include <vector>
+#include <random>
+#include <memory>
+#include <cmath>
 
-// Define the Partial struct in a dedicated header.
-// Also define the AdditiveSettings struct so both "AdditiveEffects.h"
-// and "GriffinFFT_UL.h" can use it without circular references.
+// -------------------------
+// 1) Data Structures
+// -------------------------
 
+// Define Partial
 struct Partial
 {
     std::vector<float> times;
@@ -15,12 +20,115 @@ struct Partial
     float spatialPosition = 0.5f;
 };
 
+// Define AdditiveSettings
 struct AdditiveSettings
 {
     bool enableTimeStretch = true;
-    bool enableRandomPan   = true;
-    bool enableLfoMod      = true;
+    bool enableRandomPan = true;
+    bool enableLfoMod = true;
 
     float timeStretchFactor = 2.0f; // For time stretch
-    float lfoRateHz         = 0.5f; // For LFO effect
+    float lfoRateHz = 0.5f; // For LFO effect
+};
+
+// -------------------------
+// 2) Effect Interface
+// -------------------------
+struct IAdditiveEffect
+{
+    virtual ~IAdditiveEffect() {}
+    virtual void processPartials(std::vector<Partial>& partials,
+        float sampleRate,
+        const AdditiveSettings& settings) = 0;
+};
+
+// -------------------------
+// 3) Concrete Effects
+// -------------------------
+
+// a) TimeStretchEffect
+struct TimeStretchEffect : public IAdditiveEffect
+{
+    void processPartials(std::vector<Partial>& partials,
+        float /*sampleRate*/,
+        const AdditiveSettings& settings) override
+    {
+        for (auto& p : partials)
+        {
+            for (auto& t : p.times)
+                t *= settings.timeStretchFactor;
+        }
+    }
+};
+
+// b) RandomPanEffect
+struct RandomPanEffect : public IAdditiveEffect
+{
+    std::mt19937 rng;
+
+    RandomPanEffect()
+    {
+        std::random_device rd;
+        rng.seed(rd());
+    }
+
+    void processPartials(std::vector<Partial>& partials,
+        float /*sampleRate*/,
+        const AdditiveSettings& /*settings*/) override
+    {
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+        for (auto& p : partials)
+        {
+            p.spatialPosition = dist(rng);
+            // Optionally reset the envelope to 1.0 for each partial
+            p.envelope.assign(p.times.size(), 1.0f);
+        }
+    }
+};
+
+// c) LfoModEffect
+struct LfoModEffect : public IAdditiveEffect
+{
+    void processPartials(std::vector<Partial>& partials,
+        float sampleRate,
+        const AdditiveSettings& settings) override
+    {
+        float twoPi = 6.283185307f;
+        float rate = settings.lfoRateHz;
+
+        for (auto& p : partials)
+        {
+            p.envelope.resize(p.times.size(), 1.0f);
+
+            for (size_t n = 0; n < p.times.size(); ++n)
+            {
+                float t = p.times[n] / sampleRate;
+                p.envelope[n] = 1.0f + 0.2f * std::sin(twoPi * rate * t);
+            }
+        }
+    }
+};
+
+// -------------------------
+// 4) Chain
+// -------------------------
+class AdditiveEffectsChain
+{
+public:
+    void addEffect(std::unique_ptr<IAdditiveEffect> effect)
+    {
+        effects.push_back(std::move(effect));
+    }
+
+    void processPartials(std::vector<Partial>& partials,
+        float sampleRate,
+        const AdditiveSettings& settings)
+    {
+        for (auto& fx : effects)
+            fx->processPartials(partials, sampleRate, settings);
+    }
+
+private:
+    std::vector<std::unique_ptr<IAdditiveEffect>> effects;
 };
