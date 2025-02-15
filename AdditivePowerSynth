@@ -1,13 +1,10 @@
-// ------------------------------
 // Griffin_FFT_Sampler.h
-// ------------------------------
 #pragma once
 #include <JuceHeader.h>
 #include <array>
 #include <vector>
 #include <cmath>
 #include <algorithm>
-
 #include "src/GriffinFFT_UL.h"
 
 namespace project
@@ -21,9 +18,6 @@ namespace project
     {
         SNEX_NODE(Griffin_FFT_Sampler);
 
-        //--------------------------------------------------------------------------------
-        // Metadata
-        //--------------------------------------------------------------------------------
         struct MetadataClass { SN_NODE_ID("Griffin_FFT_Sampler"); };
 
         static constexpr bool isModNode() { return false; }
@@ -38,9 +32,7 @@ namespace project
         static constexpr int NumFilters = 0;
         static constexpr int NumDisplayBuffers = 0;
 
-        //--------------------------------------------------------------------------------
-        // Per-Voice
-        //--------------------------------------------------------------------------------
+        // Per-Voice definition.
         struct Voice
         {
             int    midiNote = 60;
@@ -48,7 +40,6 @@ namespace project
             float  velocity = 1.0f;
             double position = 0.0;
             double delta = 1.0;
-
             inline void reset(int note, float vel, double startPos, double readDelta)
             {
                 midiNote = note;
@@ -60,51 +51,38 @@ namespace project
         };
         PolyData<Voice, NV> voices;
 
-        //--------------------------------------------------------------------------------
-        // Sample Data
-        //--------------------------------------------------------------------------------
         ExternalData       sampleData;
         AudioBuffer<float> sampleBuffer;
+        // sample[] still holds pointers to the channels.
         std::array<const float*, 2> sample{ nullptr, nullptr };
 
-        //--------------------------------------------------------------------------------
-        // Rate & Pitch
-        //--------------------------------------------------------------------------------
         std::array<float, 128> pitchRatios{};
         double sampleRate = 44100.0;
         double sampleRateRatio = 1.0;
 
-        //--------------------------------------------------------------------------------
-        // FFT Processor
-        //--------------------------------------------------------------------------------
-        GriffinFFT_UL fftInstance; // Our new dual-resolution FFT engine.
+        GriffinFFT_UL fftInstance;
 
-        //--------------------------------------------------------------------------------
-        // Parameters
-        //--------------------------------------------------------------------------------
+        // Stores analysis frames when "Analyse FFT" is triggered.
+        std::vector<GriffinFFT_UL::SpectralFrame> analysisFrames;
+
+        // Parameters:
         double pitchOffsetSemitones = 0.0;
         float  playheadPosition = 0.0f;
         float  gain = 1.0f;
-        bool   processFFT = false;
+        // These act like one-shot buttons:
+        bool   processFFT = false;         // Analyse FFT: when triggered, analyze and store spectral frames.
+        bool   renderSpectralFx = false;     // Render Spectral FX: when triggered, process mono sample with additive synthesis FX and return stereo.
 
-        //--------------------------------------------------------------------------------
-        // prepare
-        //--------------------------------------------------------------------------------
         inline void prepare(PrepareSpecs specs)
         {
             sampleRate = specs.sampleRate;
             initPitchRatios();
             voices.prepare(specs);
-
             fftInstance.reset();
             fftInstance.setSampleRate((float)sampleRate);
-            // Set default maximum partials (default is 60).
             fftInstance.setMaxPartials(60);
         }
 
-        //--------------------------------------------------------------------------------
-        // setExternalData
-        //--------------------------------------------------------------------------------
         inline void setExternalData(const ExternalData& ed, int /*index*/)
         {
             sampleData = ed;
@@ -115,8 +93,6 @@ namespace project
                 sampleBuffer.makeCopyOf(fallback, true);
                 goto finalize;
             }
-
-            // Check for multi-channel buffer
             auto* mCab = dynamic_cast<hise::MultiChannelAudioBuffer*>(ed.obj);
             if (!mCab)
             {
@@ -125,12 +101,9 @@ namespace project
                 sampleBuffer.makeCopyOf(fallback, true);
                 goto finalize;
             }
-
-            // Copy to internal buffer
             AudioSampleBuffer& src = mCab->getBuffer();
             int fileNumCh = src.getNumChannels();
             int fileNumSamps = src.getNumSamples();
-
             if (fileNumSamps <= 0)
             {
                 AudioBuffer<float> fallback(2, 4);
@@ -138,10 +111,8 @@ namespace project
                 sampleBuffer.makeCopyOf(fallback, true);
                 goto finalize;
             }
-
             if (fileNumCh == 1)
             {
-                // Make it stereo if mono
                 AudioBuffer<float> twoChan(2, fileNumSamps);
                 twoChan.clear();
                 const float* monoPtr = src.getReadPointer(0);
@@ -155,40 +126,29 @@ namespace project
             }
             else
             {
-                // Copy as is
                 AudioBuffer<float> tmp(fileNumCh, fileNumSamps);
                 tmp.clear();
                 for (int ch = 0; ch < fileNumCh; ++ch)
                     tmp.copyFrom(ch, 0, src.getReadPointer(ch), fileNumSamps);
-
                 sampleBuffer.makeCopyOf(tmp, true);
             }
-
         finalize:
             {
                 int newCh = sampleBuffer.getNumChannels();
                 sample[0] = sampleBuffer.getReadPointer(0);
                 sample[1] = (newCh > 1) ? sampleBuffer.getReadPointer(1) : sample[0];
-
                 double fileSR = (ed.sampleRate > 0.0 ? ed.sampleRate : 44100.0);
                 fftInstance.setSampleRate((float)fileSR);
-
                 updateDerivedParameters();
             }
         }
 
-        //--------------------------------------------------------------------------------
-        // updateDerivedParameters
-        //--------------------------------------------------------------------------------
         inline void updateDerivedParameters()
         {
             double fileSR = (sampleData.sampleRate > 0.0 ? sampleData.sampleRate : 44100.0);
             sampleRateRatio = fileSR / sampleRate;
         }
 
-        //--------------------------------------------------------------------------------
-        // handleHiseEvent
-        //--------------------------------------------------------------------------------
         inline void handleHiseEvent(HiseEvent& e)
         {
             if (e.isNoteOn())
@@ -197,77 +157,51 @@ namespace project
                 int currentSampleLength = sampleBuffer.getNumSamples();
                 if (currentSampleLength < 1)
                     currentSampleLength = 1;
-
                 double startPos = playheadPosition * (currentSampleLength - 1);
                 double baseDelta = pitchRatios[e.getNoteNumber()] * sampleRateRatio;
                 double globalFact = std::pow(2.0, pitchOffsetSemitones / 12.0);
                 double readDelta = baseDelta * globalFact;
-
                 voice.reset(e.getNoteNumber(), e.getFloatVelocity(), startPos, readDelta);
             }
         }
 
-        //--------------------------------------------------------------------------------
-        // process
-        //--------------------------------------------------------------------------------
         template <typename ProcessDataType>
         inline void process(ProcessDataType& data)
         {
             DataReadLock sl(sampleData);
             auto& fixData = data.template as<ProcessData<getFixChannelAmount()>>();
             auto audioBlock = fixData.toAudioBlock();
-
             auto* leftChannel = audioBlock.getChannelPointer(0);
             auto* rightChannel = audioBlock.getChannelPointer(1);
             int totalSamples = data.getNumSamples();
             int sampleLen = sampleBuffer.getNumSamples();
-
-            if (sampleLen <= 0)
-            {
-                audioBlock.clear();
-                return;
-            }
-
+            if (sampleLen <= 0) { audioBlock.clear(); return; }
             for (auto& v : voices)
             {
                 if (!v.isActive)
                     continue;
-
-                float  voiceGain = v.velocity * gain;
+                float voiceGain = v.velocity * gain;
                 double posLocal = v.position;
                 double delta = v.delta;
-
                 for (int i = 0; i < totalSamples; ++i)
                 {
-                    if (posLocal >= sampleLen - 1)
-                    {
-                        v.isActive = false;
-                        break;
-                    }
-
-                    int   idx = (int)posLocal;
+                    if (posLocal >= sampleLen - 1) { v.isActive = false; break; }
+                    int idx = (int)posLocal;
                     float frac = (float)(posLocal - idx);
-
                     float s0L = sample[0][idx];
                     float s1L = sample[0][std::min(idx + 1, sampleLen - 1)];
                     float s0R = sample[1][idx];
                     float s1R = sample[1][std::min(idx + 1, sampleLen - 1)];
-
                     float interpL = s0L + frac * (s1L - s0L);
                     float interpR = s0R + frac * (s1R - s0R);
-
                     leftChannel[i] += interpL * voiceGain;
                     rightChannel[i] += interpR * voiceGain;
-
                     posLocal += delta;
                 }
                 v.position = posLocal;
             }
         }
 
-        //--------------------------------------------------------------------------------
-        // createParameters
-        //--------------------------------------------------------------------------------
         inline void createParameters(ParameterDataList& data)
         {
             {
@@ -289,98 +223,125 @@ namespace project
                 data.add(std::move(p));
             }
             {
-                // Parameter 3: Partial Cap as a normalized slider [0,1] mapped to [3,300]
                 parameter::data p("Partial Cap", { 0.0, 1.0, 0.001 });
                 registerCallback<3>(p);
+                p.setDefaultValue(1.0);
+                data.add(std::move(p));
+            }
+            {
+                // Analyse FFT acts as a one-shot button.
+                parameter::data p("Analyse FFT", { 0.0, 1.0, 1.0 });
+                registerCallback<4>(p);
                 p.setDefaultValue(0.0);
                 data.add(std::move(p));
             }
             {
-                parameter::data p("Process FFT", { 0.0, 1.0, 1.0 });
-                registerCallback<4>(p);
+                // Render Spectral FX acts as a one-shot button.
+                parameter::data p("Render Spectral FX", { 0.0, 1.0, 1.0 });
+                registerCallback<5>(p);
                 p.setDefaultValue(0.0);
                 data.add(std::move(p));
             }
         }
 
-        //--------------------------------------------------------------------------------
-        // setParameter
-        //--------------------------------------------------------------------------------
         template <int P>
         inline void setParameter(double v)
         {
             if constexpr (P == 0)
-            {
                 pitchOffsetSemitones = v;
-            }
             else if constexpr (P == 1)
-            {
                 playheadPosition = (float)v;
-            }
             else if constexpr (P == 2)
-            {
                 gain = (float)v;
-            }
             else if constexpr (P == 3)
             {
-                // Map v in [0,1] to integer in [3,300] for max partials.
                 int newMax = static_cast<int>(v * (300 - 3) + 3);
                 fftInstance.setMaxPartials(newMax);
             }
             else if constexpr (P == 4)
             {
-                bool newVal = (v >= 0.5);
-                if (newVal != processFFT)
+                // When the Analyse FFT button is pressed, sum the stereo sample to mono and analyze.
+                if (v >= 0.5 && !processFFT)
                 {
-                    processFFT = newVal;
-                    if (processFFT && sampleBuffer.getNumSamples() > 0)
-                        processSampleBufferWithFFT();
+                    processFFT = true;
+                    renderSpectralFx = false;
+                    processSampleBufferWithFFT();
+                }
+            }
+            else if constexpr (P == 5)
+            {
+                // When the Render Spectral FX button is pressed, sum the stereo sample to mono, process with additive FX, and return stereo.
+                if (v >= 0.5 && !renderSpectralFx)
+                {
+                    renderSpectralFx = true;
+                    processFFT = false;
+                    processSampleBufferWithFFT();
                 }
             }
         }
 
-        //--------------------------------------------------------------------------------
-        // processSampleBufferWithFFT
-        //--------------------------------------------------------------------------------
+        // This function sums the sampleBuffer to mono before sending it to the UL FFT routines.
         inline void processSampleBufferWithFFT()
         {
             const int numSamples = sampleBuffer.getNumSamples();
             if (numSamples <= 0)
                 return;
 
+            // Sum stereo channels to mono.
+            std::vector<float> monoBuffer(numSamples, 0.0f);
             const int numCh = sampleBuffer.getNumChannels();
-            for (int ch = 0; ch < numCh; ++ch)
+            if (numCh >= 2)
             {
-                const float* inData = sampleBuffer.getReadPointer(ch);
-                auto processed = fftInstance.processOfflineBufferWithSTFT(inData, numSamples, false);
-                float* outPtr = sampleBuffer.getWritePointer(ch);
-                int copyLen = std::min((int)processed.size(), numSamples);
-                std::copy(processed.begin(), processed.begin() + copyLen, outPtr);
+                const float* leftPtr = sampleBuffer.getReadPointer(0);
+                const float* rightPtr = sampleBuffer.getReadPointer(1);
+                for (int i = 0; i < numSamples; ++i)
+                    monoBuffer[i] = 0.5f * (leftPtr[i] + rightPtr[i]);
+            }
+            else
+            {
+                const float* monoPtr = sampleBuffer.getReadPointer(0);
+                std::copy(monoPtr, monoPtr + numSamples, monoBuffer.begin());
             }
 
+            if (renderSpectralFx)
+            {
+                auto stereo = fftInstance.processOfflineBufferWithSpectralFx(monoBuffer.data(), numSamples, false);
+                if (numCh >= 2)
+                {
+                    float* leftOut = sampleBuffer.getWritePointer(0);
+                    float* rightOut = sampleBuffer.getWritePointer(1);
+                    int copyLen = std::min((int)stereo[0].size(), numSamples);
+                    std::copy(stereo[0].begin(), stereo[0].begin() + copyLen, leftOut);
+                    std::copy(stereo[1].begin(), stereo[1].begin() + copyLen, rightOut);
+                }
+                renderSpectralFx = false; // Reset trigger.
+            }
+            else if (processFFT)
+            {
+                analysisFrames = fftInstance.stftAnalyzeFullBuffer(monoBuffer.data(), numSamples);
+                processFFT = false; // Reset trigger.
+            }
+            else
+            {
+                // If neither button is pressed, do nothing.
+            }
+            // Update sample pointers.
             int newCh = sampleBuffer.getNumChannels();
             sample[0] = sampleBuffer.getReadPointer(0);
             sample[1] = (newCh > 1 ? sampleBuffer.getReadPointer(1) : sample[0]);
         }
 
-        //--------------------------------------------------------------------------------
-        // Utility - Build pitch ratio table
-        //--------------------------------------------------------------------------------
         inline void initPitchRatios()
         {
             for (int i = 0; i < 128; ++i)
                 pitchRatios[i] = std::pow(2.0f, (float)(i - 60) / 12.0f);
         }
 
-        //--------------------------------------------------------------------------------
-        // processFrame - unused
-        //--------------------------------------------------------------------------------
         template <typename FrameDataType>
         inline void processFrame(FrameDataType&) {}
-
-        //--------------------------------------------------------------------------------
-        // reset - no-op
-        //--------------------------------------------------------------------------------
         inline void reset() {}
+
+    private:
+        // All heavy lifting is done by fftInstance (defined in GriffinFFT_UL.h).
     };
-} // namespace project
+}
