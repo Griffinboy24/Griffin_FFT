@@ -9,8 +9,8 @@
 #include <cmath>
 #include <cstring>
 
+// Include only AdditiveData.h, which itself includes AdditiveEffects.h
 #include "AdditiveData.h"
-#include "AdditiveEffects.h"
 
 // GriffinFFT_UL: does the STFT analysis, partial extraction, additive resynthesis.
 class GriffinFFT_UL
@@ -304,8 +304,8 @@ public:
         // Extract partials
         auto partials = extractPartials(frames,
             additivePeakThreshold,
-            /*continueThresh=*/0.5f * additivePeakThreshold,
-            /*maxGap=*/86,
+            0.5f * additivePeakThreshold,
+            86,
             maxPartials);
 
         // Build chain if not bypassed
