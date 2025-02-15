@@ -5,7 +5,7 @@
 #include <cmath>
 #include <algorithm>
 
-#include "src/AdditiveData.h"
+#include "src/AdditiveData.h"  // Still references the pass-through header
 #include "src/GriffinFFT_UL.h"
 
 namespace project
