@@ -1,11 +1,11 @@
-///////////////////////////////////////
-// Griffin_FFT_Sampler.h
 #pragma once
 #include <JuceHeader.h>
 #include <array>
 #include <vector>
 #include <cmath>
 #include <algorithm>
+
+#include "src/AdditiveData.h"
 #include "src/GriffinFFT_UL.h"
 
 namespace project
@@ -33,6 +33,7 @@ namespace project
         static constexpr int NumFilters = 0;
         static constexpr int NumDisplayBuffers = 0;
 
+        // Per-voice structure
         struct Voice
         {
             int    midiNote = 60;
@@ -68,6 +69,11 @@ namespace project
         float  gain = 1.0f;
         bool   processFFT = false;
         bool   renderSpectralFx = false;
+
+        // New effect toggles
+        bool enableTimeStretch = true;
+        bool enableRandomPan = true;
+        bool enableLfo = true;
 
         inline void prepare(PrepareSpecs specs)
         {
@@ -157,10 +163,12 @@ namespace project
                 int currentSampleLength = sampleBuffer.getNumSamples();
                 if (currentSampleLength < 1)
                     currentSampleLength = 1;
+
                 double startPos = playheadPosition * (currentSampleLength - 1);
                 double baseDelta = pitchRatios[e.getNoteNumber()] * sampleRateRatio;
                 double globalFact = std::pow(2.0, pitchOffsetSemitones / 12.0);
                 double readDelta = baseDelta * globalFact;
+
                 voice.reset(e.getNoteNumber(), e.getFloatVelocity(), startPos, readDelta);
             }
         }
@@ -175,6 +183,7 @@ namespace project
             auto* rightChannel = audioBlock.getChannelPointer(1);
             int totalSamples = data.getNumSamples();
             int sampleLen = sampleBuffer.getNumSamples();
+
             if (sampleLen <= 0)
             {
                 audioBlock.clear();
@@ -255,6 +264,24 @@ namespace project
                 p.setDefaultValue(0.0);
                 data.add(std::move(p));
             }
+            {
+                parameter::data p("Enable TimeStretch", { 0.0, 1.0, 1.0 });
+                registerCallback<6>(p);
+                p.setDefaultValue(1.0);
+                data.add(std::move(p));
+            }
+            {
+                parameter::data p("Enable RandomPan", { 0.0, 1.0, 1.0 });
+                registerCallback<7>(p);
+                p.setDefaultValue(1.0);
+                data.add(std::move(p));
+            }
+            {
+                parameter::data p("Enable LFO", { 0.0, 1.0, 1.0 });
+                registerCallback<8>(p);
+                p.setDefaultValue(1.0);
+                data.add(std::move(p));
+            }
         }
 
         template <int P>
@@ -273,6 +300,7 @@ namespace project
             }
             else if constexpr (P == 4)
             {
+                // "Analyse FFT"
                 if (v >= 0.5 && !processFFT)
                 {
                     processFFT = true;
@@ -282,6 +310,7 @@ namespace project
             }
             else if constexpr (P == 5)
             {
+                // "Render Spectral FX"
                 if (v >= 0.5 && !renderSpectralFx)
                 {
                     renderSpectralFx = true;
@@ -289,6 +318,12 @@ namespace project
                     processSampleBufferWithFFT();
                 }
             }
+            else if constexpr (P == 6)
+                enableTimeStretch = (v >= 0.5);
+            else if constexpr (P == 7)
+                enableRandomPan = (v >= 0.5);
+            else if constexpr (P == 8)
+                enableLfo = (v >= 0.5);
         }
 
         inline void processSampleBufferWithFFT()
@@ -297,6 +332,7 @@ namespace project
             if (numSamples <= 0)
                 return;
 
+            // Sum stereo to mono
             std::vector<float> monoBuffer(numSamples, 0.0f);
             const int numCh = sampleBuffer.getNumChannels();
             if (numCh >= 2)
@@ -314,8 +350,18 @@ namespace project
 
             if (renderSpectralFx)
             {
-                // Process with time stretch + stereo.
-                auto stereo = fftInstance.processOfflineBufferWithSpectralFx(monoBuffer.data(), numSamples, false, 2.0f);
+                // Build the user toggles
+                AdditiveSettings settings;
+                settings.enableTimeStretch = enableTimeStretch;
+                settings.enableRandomPan = enableRandomPan;
+                settings.enableLfoMod = enableLfo;
+                settings.timeStretchFactor = 2.0f; // example
+
+                auto stereo = fftInstance.processOfflineBufferWithSpectralFx(
+                    monoBuffer.data(),
+                    numSamples,
+                    false,
+                    settings);
 
                 int newLen = (int)stereo[0].size();
                 sampleBuffer.setSize(2, newLen, false, false, true);
@@ -328,6 +374,7 @@ namespace project
             }
             else if (processFFT)
             {
+                // Just do the analysis
                 analysisFrames = fftInstance.stftAnalyzeFullBuffer(monoBuffer.data(), numSamples);
                 processFFT = false;
             }
@@ -345,8 +392,14 @@ namespace project
         }
 
         template <typename FrameDataType>
-        inline void processFrame(FrameDataType&) {}
+        inline void processFrame(FrameDataType&)
+        {
+            // Not used for this sampler
+        }
 
-        inline void reset() {}
+        inline void reset()
+        {
+            // Not used for this sampler
+        }
     };
 }
