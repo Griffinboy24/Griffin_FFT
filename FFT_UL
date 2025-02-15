@@ -646,7 +646,7 @@ public:
         for (size_t i = 0; i < framePeaks.size(); ++i)
             used[i] = std::vector<bool>(framePeaks[i].size(), false);
 
-        float freqTolerance = 15.0f; // pitch frequency leniency tolerance
+        float freqTolerance = 18.0f; // pitch frequency leniency tolerance
         int minDuration = 3;
 
         for (size_t i = 0; i < framePeaks.size(); ++i)
