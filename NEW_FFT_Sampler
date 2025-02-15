@@ -247,7 +247,7 @@ namespace project
                 data.add(std::move(p));
             }
             {
-                parameter::data p("Partial Cap", { 0.0, 1.0, 0.001 });
+                parameter::data p("Partial Limit", { 0.0, 1.0, 0.001 });
                 registerCallback<3>(p);
                 p.setDefaultValue(1.0);
                 data.add(std::move(p));
@@ -267,19 +267,19 @@ namespace project
             {
                 parameter::data p("Enable TimeStretch", { 0.0, 1.0, 1.0 });
                 registerCallback<6>(p);
-                p.setDefaultValue(1.0);
+                p.setDefaultValue(0.0);
                 data.add(std::move(p));
             }
             {
                 parameter::data p("Enable RandomPan", { 0.0, 1.0, 1.0 });
                 registerCallback<7>(p);
-                p.setDefaultValue(1.0);
+                p.setDefaultValue(0.0);
                 data.add(std::move(p));
             }
             {
                 parameter::data p("Enable LFO", { 0.0, 1.0, 1.0 });
                 registerCallback<8>(p);
-                p.setDefaultValue(1.0);
+                p.setDefaultValue(0.0);
                 data.add(std::move(p));
             }
         }
