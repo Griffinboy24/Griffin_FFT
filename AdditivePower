@@ -1,8 +1,5 @@
+///////////////////////////////////////
 // GriffinFFT_UL.h
-// FFT engine with dual-resolution (multiresolution) STFT reassignment.
-// This version includes a dedicated Partial structure, decoupled analysis/processing,
-// and a modular pipeline for per-partial effects (including careful transient injection
-// and a new random panning effect for spectral FX).
 #pragma once
 #include <JuceHeader.h>
 #include <array>
@@ -14,26 +11,18 @@
 #include <cstring>
 #include <random>
 
-//=============================================================================
-// Dedicated data structure for additive partials.
 struct Partial {
-    std::vector<float> times;    // Time instants (in samples) for each frame
-    std::vector<float> freqs;    // Frequency values (Hz) over time
-    std::vector<float> amps;     // Amplitude values over time
-    std::vector<float> phases;   // Phase values over time
-
-    // Additional modulation parameters:
-    std::vector<float> envelope; // A per-frame envelope modulation (for dynamic effects)
-    float spatialPosition = 0.0f; // Normalized pan position [0,1] (0 = left, 1 = right)
+    std::vector<float> times;
+    std::vector<float> freqs;
+    std::vector<float> amps;
+    std::vector<float> phases;
+    std::vector<float> envelope;
+    float spatialPosition = 0.0f;
 };
 
-//=============================================================================
-// GriffinFFT_UL: FFT & STFT analysis/synthesis class.
 class GriffinFFT_UL
 {
 public:
-    //--------------------------------------------------------------------------
-    // Constants and FFT/Window Settings
     static constexpr float CULLING_LENIENCY = 0.9f;
     static constexpr int fftOrder = 11;
     static constexpr int fftSize = 1 << fftOrder;
@@ -44,25 +33,26 @@ public:
     static constexpr int paddedNumBins = paddedSize / 2 + 1;
     static constexpr float windowCorrection = 2.0f / 3.0f;
 
-    //--------------------------------------------------------------------------
-    // Public Parameter Setters
     inline void setSampleRate(float sr) { currentSampleRate = sr; }
     inline void setLowpassCutoff(float /*freqHz*/) {}
     inline void setAdditivePeakThreshold(float thresh) { additivePeakThreshold = thresh; }
     inline void setMaxPartials(int m) { maxPartials = std::max(3, std::min(m, 300)); }
 
-    //--------------------------------------------------------------------------
-    // Constructor: Initialize FFT objects, window tables, and RNG.
     GriffinFFT_UL()
         : fft(fftOrder), fftPadded(zeroPadOrder),
-        currentSampleRate(44100.0f), lowpassCutoffFrequency(20000.0f),
-        additivePeakThreshold(0.05f), maxPartials(300),
-        pos(0), count(0), useGaussianWindow(true), sigma(0.3f), shortSigma(0.1f)
+        currentSampleRate(44100.0f),
+        lowpassCutoffFrequency(20000.0f),
+        additivePeakThreshold(0.05f),
+        maxPartials(300),
+        pos(0), count(0),
+        useGaussianWindow(true),
+        sigma(0.3f), shortSigma(0.1f)
     {
         windowTable.resize(fftSize);
         compositeWindow.resize(fftSize);
         derivWindow.resize(fftSize);
         timeWeightedWindow.resize(fftSize);
+
         shortWindow.resize(fftSize);
         compositeShortWindow.resize(fftSize);
         derivShortWindow.resize(fftSize);
@@ -70,38 +60,46 @@ public:
 
         for (int i = 0; i < fftSize; ++i)
         {
-            float n = static_cast<float>(i);
+            float n = (float)i;
             float center = (fftSize - 1) / 2.0f;
             if (useGaussianWindow)
                 windowTable[i] = std::exp(-0.5f * std::pow((n - center) / (sigma * center), 2.0f));
             else
                 windowTable[i] = 0.5f * (1.0f - std::cos((2.0f * 3.14159265f * i) / (fftSize - 1)));
+
             compositeWindow[i] = windowTable[i] * windowTable[i] * windowCorrection;
+
             if (i == 0)
                 derivWindow[i] = (windowTable[1] - windowTable[0]);
             else if (i == fftSize - 1)
                 derivWindow[i] = (windowTable[fftSize - 1] - windowTable[fftSize - 2]);
             else
-                derivWindow[i] = (windowTable[i + 1] - windowTable[i - 1]) * 0.5f;
-            float tOffset = static_cast<float>(i) - fftSize / 2.0f;
+                derivWindow[i] = 0.5f * (windowTable[i + 1] - windowTable[i - 1]);
+
+            float tOffset = (float)i - fftSize / 2.0f;
             timeWeightedWindow[i] = tOffset * windowTable[i];
 
             shortWindow[i] = std::exp(-0.5f * std::pow((n - center) / (shortSigma * center), 2.0f));
             compositeShortWindow[i] = shortWindow[i] * shortWindow[i] * windowCorrection;
+
             if (i == 0)
                 derivShortWindow[i] = (shortWindow[1] - shortWindow[0]);
             else if (i == fftSize - 1)
                 derivShortWindow[i] = (shortWindow[fftSize - 1] - shortWindow[fftSize - 2]);
             else
-                derivShortWindow[i] = (shortWindow[i + 1] - shortWindow[i - 1]) * 0.5f;
+                derivShortWindow[i] = 0.5f * (shortWindow[i + 1] - shortWindow[i - 1]);
+
             timeWeightedShortWindow[i] = tOffset * shortWindow[i];
         }
+
         inputFifo.fill(0.0f);
         outputFifo.fill(0.0f);
+
         fftData.resize(fftSize * 2, 0.0f);
         paddedData.resize(paddedSize * 2, 0.0f);
         paddedData_time.resize(paddedSize * 2, 0.0f);
         paddedData_deriv.resize(paddedSize * 2, 0.0f);
+
         paddedData_short.resize(paddedSize * 2, 0.0f);
         paddedData_time_short.resize(paddedSize * 2, 0.0f);
         paddedData_deriv_short.resize(paddedSize * 2, 0.0f);
@@ -110,9 +108,14 @@ public:
         randomGenerator.seed(rd());
     }
 
-    //--------------------------------------------------------------------------
-    // Reset and real-time processing (Overlap-Add)
-    inline void reset() { count = 0; pos = 0; inputFifo.fill(0.0f); outputFifo.fill(0.0f); }
+    inline void reset()
+    {
+        count = 0;
+        pos = 0;
+        inputFifo.fill(0.0f);
+        outputFifo.fill(0.0f);
+    }
+
     inline void processBlock(const float* inBlock, float* outBlock, int numSamples, bool bypassed)
     {
         int i = 0;
@@ -122,16 +125,24 @@ public:
             int samplesUntilEnd = fftSize - localPos;
             int samplesUntilFFT = hopSize - count;
             int chunk = std::min({ numSamples - i, samplesUntilEnd, samplesUntilFFT });
+
             std::copy(inBlock + i, inBlock + i + chunk, inputFifo.begin() + localPos);
             std::copy(outputFifo.begin() + localPos, outputFifo.begin() + localPos + chunk, outBlock + i);
             std::fill(outputFifo.begin() + localPos, outputFifo.begin() + localPos + chunk, 0.0f);
+
             localPos = (localPos + chunk) & (fftSize - 1);
             pos = localPos;
             count += chunk;
             i += chunk;
-            if (count >= hopSize) { count = 0; processFrame(bypassed); }
+
+            if (count >= hopSize)
+            {
+                count = 0;
+                processFrame(bypassed);
+            }
         }
     }
+
     inline float processSample(float sample, bool bypassed)
     {
         float outSample = outputFifo[pos];
@@ -142,13 +153,16 @@ public:
         if (count == 0) processFrame(bypassed);
         return outSample;
     }
+
     inline std::vector<float> flushRemaining(bool bypassed)
     {
-        std::vector<float> flushed; flushed.reserve(fftSize);
+        std::vector<float> flushed;
+        flushed.reserve(fftSize);
         for (int i = 0; i < fftSize; ++i)
             flushed.push_back(processSample(0.0f, bypassed));
         return flushed;
     }
+
     inline std::vector<float> processEntireBuffer(const float* inData, int numSamples, bool bypassed)
     {
         reset();
@@ -156,16 +170,15 @@ public:
         processBlock(inData, out.data(), numSamples, bypassed);
         auto flushed = flushRemaining(bypassed);
         out.insert(out.end(), flushed.begin(), flushed.end());
-        const int delay = fftSize - hopSize;
-        const int totalOut = static_cast<int>(out.size());
-        const int trimmedLength = std::min(totalOut - delay, numSamples);
+
+        int delay = fftSize - hopSize;
+        int totalOut = (int)out.size();
+        int trimmedLength = std::min(totalOut - delay, numSamples);
         std::vector<float> trimmed(trimmedLength, 0.0f);
         std::copy(out.begin() + delay, out.begin() + delay + trimmedLength, trimmed.begin());
         return trimmed;
     }
 
-    //--------------------------------------------------------------------------
-    // Offline STFT Analysis / Synthesis Types and Functions
     struct SpectralFrame {
         std::vector<float> amplitude;
         std::vector<float> phase;
@@ -173,20 +186,20 @@ public:
         std::vector<float> freqReassign;
     };
 
-    // Optionally set a callback to modify spectral frames.
-    std::function<void(std::vector<SpectralFrame>& frames)> offlineTransformCallback;
+    std::function<void(std::vector<SpectralFrame>&)> offlineTransformCallback;
     inline void setOfflineTransformCallback(std::function<void(std::vector<SpectralFrame>&)> cb)
     {
         offlineTransformCallback = cb;
     }
 
-    // Analyze the entire buffer into spectral frames.
     inline std::vector<SpectralFrame> stftAnalyzeFullBuffer(const float* inData, int numSamples)
     {
         int totalFrames = (numSamples + hopSize - 1) / hopSize;
         std::vector<SpectralFrame> frames;
         frames.reserve(totalFrames);
+
         std::vector<float> frameBuffer(fftSize, 0.0f);
+
         for (int frameIndex = 0; frameIndex < totalFrames; ++frameIndex)
         {
             int frameStart = frameIndex * hopSize;
@@ -194,45 +207,54 @@ public:
             std::fill(frameBuffer.begin(), frameBuffer.end(), 0.0f);
             if (countToCopy > 0)
                 std::copy(inData + frameStart, inData + frameStart + countToCopy, frameBuffer.begin());
+
             std::fill(paddedData.begin(), paddedData.end(), 0.0f);
             std::fill(paddedData_time.begin(), paddedData_time.end(), 0.0f);
             std::fill(paddedData_deriv.begin(), paddedData_deriv.end(), 0.0f);
+
             for (int i = 0; i < fftSize; ++i)
             {
                 paddedData[i] = windowTable[i] * frameBuffer[i];
                 paddedData_time[i] = timeWeightedWindow[i] * frameBuffer[i];
                 paddedData_deriv[i] = derivWindow[i] * frameBuffer[i];
             }
+
             fftPadded.performRealOnlyForwardTransform(paddedData.data(), true);
             fftPadded.performRealOnlyForwardTransform(paddedData_time.data(), true);
             fftPadded.performRealOnlyForwardTransform(paddedData_deriv.data(), true);
-            // Process short-window FFTs.
+
             std::fill(paddedData_short.begin(), paddedData_short.end(), 0.0f);
             std::fill(paddedData_time_short.begin(), paddedData_time_short.end(), 0.0f);
             std::fill(paddedData_deriv_short.begin(), paddedData_deriv_short.end(), 0.0f);
+
             for (int i = 0; i < fftSize; ++i)
             {
                 paddedData_short[i] = shortWindow[i] * frameBuffer[i];
                 paddedData_time_short[i] = timeWeightedShortWindow[i] * frameBuffer[i];
                 paddedData_deriv_short[i] = derivShortWindow[i] * frameBuffer[i];
             }
+
             fftPadded.performRealOnlyForwardTransform(paddedData_short.data(), true);
             fftPadded.performRealOnlyForwardTransform(paddedData_time_short.data(), true);
             fftPadded.performRealOnlyForwardTransform(paddedData_deriv_short.data(), true);
+
             SpectralFrame sf;
             sf.amplitude.resize(paddedNumBins);
             sf.phase.resize(paddedNumBins);
             sf.timeReassign.resize(paddedNumBins);
             sf.freqReassign.resize(paddedNumBins);
+
             auto* cdata = reinterpret_cast<std::complex<float>*>(paddedData.data());
             auto* cdata_time_short = reinterpret_cast<std::complex<float>*>(paddedData_time_short.data());
             auto* cdata_deriv_short = reinterpret_cast<std::complex<float>*>(paddedData_deriv_short.data());
+
             for (int b = 0; b < paddedNumBins; ++b)
             {
                 std::complex<float> X = cdata[b];
                 float Xmag = std::abs(X);
                 sf.amplitude[b] = Xmag;
                 sf.phase[b] = std::arg(X);
+
                 if (Xmag < 1e-6f)
                 {
                     sf.timeReassign[b] = frameIndex * hopSize + fftSize / 2;
@@ -242,10 +264,13 @@ public:
                 {
                     std::complex<float> X_time_short = cdata_time_short[b];
                     std::complex<float> X_deriv_short = cdata_deriv_short[b];
+
                     float num_t = std::real(X_time_short * std::conj(X));
                     float num_f = std::imag(X_deriv_short * std::conj(X));
+
                     float dt = num_t / (Xmag * Xmag);
                     float df = num_f / (2.0f * 3.14159265f * (Xmag * Xmag));
+
                     sf.timeReassign[b] = frameIndex * hopSize + fftSize / 2 - dt;
                     sf.freqReassign[b] = (b * currentSampleRate / paddedSize) + df;
                 }
@@ -255,40 +280,47 @@ public:
         return frames;
     }
 
-    // Synthesize the spectral frames back to a mono buffer.
     inline std::vector<float> stftSynthesizeFullBuffer(const std::vector<SpectralFrame>& frames, int originalLength)
     {
         if (frames.empty())
             return {};
-        int totalFrames = static_cast<int>(frames.size());
+
+        int totalFrames = (int)frames.size();
         std::vector<float> out((totalFrames - 1) * hopSize + fftSize + 8, 0.0f);
+
         for (int frameIndex = 0; frameIndex < totalFrames; ++frameIndex)
         {
             std::fill(paddedData.begin(), paddedData.end(), 0.0f);
             const auto& sf = frames[frameIndex];
             auto* cdata = reinterpret_cast<std::complex<float>*>(paddedData.data());
-            int nbins = std::min<int>(paddedNumBins, static_cast<int>(sf.amplitude.size()));
+            int nbins = std::min<int>(paddedNumBins, (int)sf.amplitude.size());
+
             for (int b = 0; b < nbins; ++b)
                 cdata[b] = std::polar(sf.amplitude[b], sf.phase[b]);
+
             fftPadded.performRealOnlyInverseTransform(paddedData.data());
             for (int i = 0; i < fftSize; ++i)
                 paddedData[i] *= compositeWindow[i];
+
             int outPos = frameIndex * hopSize;
             for (int i = 0; i < fftSize; ++i)
                 out[outPos + i] += paddedData[i];
         }
-        if (originalLength > 0 && originalLength < static_cast<int>(out.size()))
+
+        if (originalLength > 0 && originalLength < (int)out.size())
             out.resize(originalLength);
+
         return out;
     }
 
-    // Process offline buffer with normal STFT-based synthesis.
     inline std::vector<float> processOfflineBufferWithSTFT(const float* inData, int numSamples, bool bypassed)
     {
         if (numSamples <= 0)
             return {};
+
         auto frames = stftAnalyzeFullBuffer(inData, numSamples);
         std::vector<float> out;
+
         if (!bypassed)
         {
             if (offlineTransformCallback)
@@ -298,22 +330,30 @@ public:
             }
             else
             {
-                out = stftApplyAdditiveResynthesis_Modular(frames, additivePeakThreshold,
-                    0.5f * additivePeakThreshold, 86, 0.99f,
-                    maxPartials, numSamples);
+                out = stftApplyAdditiveResynthesis_Modular(frames,
+                    additivePeakThreshold,
+                    0.5f * additivePeakThreshold,
+                    86,
+                    0.99f,
+                    maxPartials,
+                    numSamples);
             }
         }
         else
+        {
             out = stftSynthesizeFullBuffer(frames, numSamples);
-        // RMS scaling.
+        }
+
         float origRMS = 0.0f;
         for (int i = 0; i < numSamples; i++)
             origRMS += inData[i] * inData[i];
         origRMS = std::sqrt(origRMS / numSamples);
+
         float synthRMS = 0.0f;
         for (float v : out)
             synthRMS += v * v;
         synthRMS = std::sqrt(synthRMS / out.size());
+
         if (synthRMS > 0.0f)
         {
             float scaleFactor = origRMS / synthRMS;
@@ -323,17 +363,38 @@ public:
         return out;
     }
 
-    //--------------------------------------------------------------------------
-    // New: Process offline buffer with spectral FX (stereo synthesis with random pan)
-    inline std::vector<std::vector<float>> processOfflineBufferWithSpectralFx(const float* inData, int numSamples, bool bypassed)
+    //------------------------------------------------------------------------------
+    // New function to stretch partial times.
+    inline void applyTimeStretch(std::vector<Partial>& partials, float stretchFactor)
+    {
+        for (auto& p : partials)
+            for (auto& t : p.times)
+                t *= stretchFactor;
+    }
+
+    //------------------------------------------------------------------------------
+    // Offline spectral FX with stereo + time stretch
+    inline std::vector<std::vector<float>> processOfflineBufferWithSpectralFx(const float* inData, int numSamples, bool bypassed, float timeStretchFactor = 1.0f)
     {
         if (numSamples <= 0)
             return {};
+
         auto frames = stftAnalyzeFullBuffer(inData, numSamples);
         auto partials = extractPartials(frames, additivePeakThreshold, 0.5f * additivePeakThreshold, 86, maxPartials);
-        applyEffectsRandomPan(partials);
-        auto stereo = synthesizePartialsStereo(partials, numSamples);
-        // Optional per-channel RMS scaling.
+
+        if (!bypassed)
+        {
+            // First pass: time stretch
+            applyTimeStretch(partials, timeStretchFactor);
+
+            // Second pass: stereo manipulation
+            applyEffectsRandomPan(partials);
+        }
+
+        int stretchedLen = (int)(numSamples * timeStretchFactor);
+        auto stereo = synthesizePartialsStereo(partials, stretchedLen);
+
+        // Optional quick amplitude trim per channel
         for (int ch = 0; ch < 2; ++ch)
         {
             float rms = 0.0f;
@@ -342,32 +403,38 @@ public:
             rms = std::sqrt(rms / stereo[ch].size());
             if (rms > 0.0f)
             {
-                float scale = 0.1f / rms; // adjust as needed
+                float scale = 0.1f / rms;
                 for (auto& v : stereo[ch])
                     v *= scale;
             }
         }
+
         return stereo;
     }
 
-    //--------------------------------------------------------------------------
-    // Mono synthesis with careful transient injection.
+    //------------------------------------------------------------------------------
     inline std::vector<float> synthesizePartials(const std::vector<Partial>& partials, int originalLength)
     {
-        int totalLength = (originalLength > 0) ? originalLength :
-            (partials.empty() ? 0 : static_cast<int>(partials[0].times.back()) + fftSize);
+        int totalLength = originalLength;
+        if (partials.empty())
+            totalLength = 0;
+        else if (originalLength <= 0)
+            totalLength = (int)(partials[0].times.back()) + fftSize;
+
         std::vector<float> synth(totalLength, 0.0f);
-        const float twoPi = 6.28318530717958647692f;
+        float twoPi = 6.28318530717958647692f;
+
         for (const auto& p : partials)
         {
             if (p.times.empty())
                 continue;
-            int onsetSample = static_cast<int>(std::round(p.times.front()));
-            // Only inject a transient if the first amplitude is clearly higher than the second.
+
+            int onsetSample = (int)std::round(p.times.front());
+
             if (p.amps.size() >= 2 && p.amps.front() > 1.0f * (p.amps[1] + 0.0001f))
             {
                 int transientWidth = 8;
-                float onsetAmp = p.amps.front() * 0.8f; // reduced amplitude
+                float onsetAmp = p.amps.front() * 0.8f;
                 float onsetPhase = p.phases.front();
                 for (int n = 0; n < transientWidth; n++)
                 {
@@ -379,59 +446,70 @@ public:
                     }
                 }
             }
+
             float startTimeF = p.times.front();
             float endTimeF = p.times.back();
-            int startSample = static_cast<int>(std::floor(startTimeF));
-            int endSample = static_cast<int>(std::ceil(endTimeF));
+            int startSample = (int)std::floor(startTimeF);
+            int endSample = (int)std::ceil(endTimeF);
             int trackLength = endSample - startSample;
             if (trackLength <= 0)
                 continue;
+
             float phase = p.phases.front();
             int trajPointIndex = 0;
             int fadeSamples = std::min(8, trackLength / 20);
+
             for (int n = startSample; n < endSample; n++)
             {
-                while (trajPointIndex < static_cast<int>(p.times.size()) - 1 && p.times[trajPointIndex + 1] < n)
+                while (trajPointIndex < (int)p.times.size() - 1 && p.times[trajPointIndex + 1] < n)
                     trajPointIndex++;
+
                 int i0 = trajPointIndex;
-                int i1 = std::min(trajPointIndex + 1, static_cast<int>(p.times.size()) - 1);
-                float t0 = p.times[i0], t1 = p.times[i1];
+                int i1 = std::min(trajPointIndex + 1, (int)p.times.size() - 1);
+                float t0 = p.times[i0];
+                float t1 = p.times[i1];
                 float alpha = (t1 - t0) > 0.0f ? (n - t0) / (t1 - t0) : 0.0f;
+
                 float freqInterp = p.freqs[i0] * (1.0f - alpha) + p.freqs[i1] * alpha;
                 float ampInterp = p.amps[i0] * (1.0f - alpha) + p.amps[i1] * alpha;
                 float envMod = p.envelope[i0] * (1.0f - alpha) + p.envelope[i1] * alpha;
+
                 phase += twoPi * freqInterp / currentSampleRate;
+
                 float fade = 1.0f;
                 if (n - startSample < fadeSamples)
-                    fade = (n - startSample) / static_cast<float>(fadeSamples);
+                    fade = (n - startSample) / (float)fadeSamples;
                 else if (endSample - n < fadeSamples)
-                    fade = (endSample - n) / static_cast<float>(fadeSamples);
+                    fade = (endSample - n) / (float)fadeSamples;
+
                 if (n >= 0 && n < totalLength)
                     synth[n] += ampInterp * fade * envMod * std::cos(phase);
             }
         }
+
         float maxVal = 0.0f;
         for (float v : synth)
             maxVal = std::max(maxVal, std::fabs(v));
         if (maxVal > 0.0f)
-            for (auto& v : synth) v /= maxVal;
+            for (auto& v : synth)
+                v /= maxVal;
+
         return synth;
     }
 
-    //--------------------------------------------------------------------------
-    // New: Apply default LFO modulation effects to each partial.
     inline void applyEffects(std::vector<Partial>& partials)
     {
-        const float lfoRate = 0.5f; // 0.5 Hz LFO rate
-        const float sRate = currentSampleRate;
+        float lfoRate = 0.5f;
+        float sRate = currentSampleRate;
         for (auto& p : partials)
         {
             p.envelope.resize(p.times.size(), 1.0f);
             float sumFreq = 0.0f;
             for (float f : p.freqs)
                 sumFreq += f;
-            float avgFreq = (p.freqs.empty()) ? 0.0f : sumFreq / p.freqs.size();
+            float avgFreq = p.freqs.empty() ? 0.0f : (sumFreq / p.freqs.size());
             p.spatialPosition = avgFreq / (currentSampleRate / 2.0f);
+
             for (size_t i = 0; i < p.times.size(); ++i)
             {
                 float t = p.times[i] / sRate;
@@ -440,8 +518,6 @@ public:
         }
     }
 
-    //--------------------------------------------------------------------------
-    // New: Apply random panning by assigning each partial a random spatialPosition.
     inline void applyEffectsRandomPan(std::vector<Partial>& partials)
     {
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
@@ -452,22 +528,28 @@ public:
         }
     }
 
-    //--------------------------------------------------------------------------
-    // New: Stereo synthesis using random pan.
     inline std::vector<std::vector<float>> synthesizePartialsStereo(const std::vector<Partial>& partials, int originalLength)
     {
-        int totalLength = (originalLength > 0) ? originalLength :
-            (partials.empty() ? 0 : static_cast<int>(partials[0].times.back()) + fftSize);
+        int totalLength = originalLength;
+        if (partials.empty())
+            totalLength = 0;
+        else if (originalLength <= 0)
+            totalLength = (int)(partials[0].times.back()) + fftSize;
+
         std::vector<float> left(totalLength, 0.0f), right(totalLength, 0.0f);
-        const float twoPi = 6.28318530717958647692f;
+        float twoPi = 6.28318530717958647692f;
+
         for (const auto& p : partials)
         {
             if (p.times.empty())
                 continue;
-            float pan = p.spatialPosition; // 0 = left, 1 = right
+
+            float pan = p.spatialPosition;
             float leftGain = std::sqrt(1.0f - pan);
             float rightGain = std::sqrt(pan);
-            int onsetSample = static_cast<int>(std::round(p.times.front()));
+
+            int onsetSample = (int)std::round(p.times.front());
+
             if (p.amps.size() >= 2 && p.amps.front() > 0.8f * (p.amps[1] + 0.0001f))
             {
                 int transientWidth = 4;
@@ -484,40 +566,51 @@ public:
                     }
                 }
             }
+
             float startTimeF = p.times.front();
             float endTimeF = p.times.back();
-            int startSample = static_cast<int>(std::floor(startTimeF));
-            int endSample = static_cast<int>(std::ceil(endTimeF));
+            int startSample = (int)std::floor(startTimeF);
+            int endSample = (int)std::ceil(endTimeF);
             int trackLength = endSample - startSample;
             if (trackLength <= 0)
                 continue;
+
             float phase = p.phases.front();
             int trajPointIndex = 0;
             int fadeSamples = std::min(8, trackLength / 20);
+
             for (int n = startSample; n < endSample; n++)
             {
-                while (trajPointIndex < static_cast<int>(p.times.size()) - 1 && p.times[trajPointIndex + 1] < n)
+                while (trajPointIndex < (int)p.times.size() - 1 && p.times[trajPointIndex + 1] < n)
                     trajPointIndex++;
+
                 int i0 = trajPointIndex;
-                int i1 = std::min(trajPointIndex + 1, static_cast<int>(p.times.size()) - 1);
-                float t0 = p.times[i0], t1 = p.times[i1];
+                int i1 = std::min(trajPointIndex + 1, (int)p.times.size() - 1);
+                float t0 = p.times[i0];
+                float t1 = p.times[i1];
                 float alpha = (t1 - t0) > 0.0f ? (n - t0) / (t1 - t0) : 0.0f;
+
                 float freqInterp = p.freqs[i0] * (1.0f - alpha) + p.freqs[i1] * alpha;
                 float ampInterp = p.amps[i0] * (1.0f - alpha) + p.amps[i1] * alpha;
                 float envMod = p.envelope[i0] * (1.0f - alpha) + p.envelope[i1] * alpha;
+
                 phase += twoPi * freqInterp / currentSampleRate;
+
                 float fade = 1.0f;
                 if (n - startSample < fadeSamples)
-                    fade = (n - startSample) / static_cast<float>(fadeSamples);
+                    fade = (n - startSample) / (float)fadeSamples;
                 else if (endSample - n < fadeSamples)
-                    fade = (endSample - n) / static_cast<float>(fadeSamples);
+                    fade = (endSample - n) / (float)fadeSamples;
+
                 if (n >= 0 && n < totalLength)
                 {
-                    left[n] += ampInterp * fade * envMod * std::cos(phase) * leftGain;
-                    right[n] += ampInterp * fade * envMod * std::cos(phase) * rightGain;
+                    float val = ampInterp * fade * envMod * std::cos(phase);
+                    left[n] += val * leftGain;
+                    right[n] += val * rightGain;
                 }
             }
         }
+
         float maxLeft = 0.0f, maxRight = 0.0f;
         for (int i = 0; i < totalLength; ++i)
         {
@@ -525,51 +618,68 @@ public:
             maxRight = std::max(maxRight, std::fabs(right[i]));
         }
         if (maxLeft > 0.0f)
-            for (auto& v : left) v /= maxLeft;
+            for (auto& v : left)
+                v /= maxLeft;
         if (maxRight > 0.0f)
-            for (auto& v : right) v /= maxRight;
+            for (auto& v : right)
+                v /= maxRight;
+
         return { left, right };
     }
 
-    //--------------------------------------------------------------------------
-    // Complete modular additive resynthesis pipeline (mono version).
     inline std::vector<float> stftApplyAdditiveResynthesis_Modular(const std::vector<SpectralFrame>& frames,
-        float startThresh, float continueThresh, int maxGap, float decayFactor,
-        int maxPartialsParam, int originalLength)
+        float startThresh,
+        float continueThresh,
+        int maxGap,
+        float decayFactor,
+        int maxPartialsParam,
+        int originalLength)
     {
         auto partials = extractPartials(frames, startThresh, continueThresh, maxGap, maxPartialsParam);
         applyEffects(partials);
         return synthesizePartials(partials, originalLength);
     }
 
-    //--------------------------------------------------------------------------
-    // Helper: Unwrap phase values.
     inline std::vector<float> unwrapPhase(const std::vector<float>& phases)
     {
         std::vector<float> unwrapped = phases;
         for (size_t i = 1; i < unwrapped.size(); i++)
         {
             float dp = unwrapped[i] - unwrapped[i - 1];
-            while (dp > 3.14159265f) { unwrapped[i] -= 2.0f * 3.14159265f; dp = unwrapped[i] - unwrapped[i - 1]; }
-            while (dp < -3.14159265f) { unwrapped[i] += 2.0f * 3.14159265f; dp = unwrapped[i] - unwrapped[i - 1]; }
+            while (dp > 3.14159265f)
+            {
+                unwrapped[i] -= 2.0f * 3.14159265f;
+                dp = unwrapped[i] - unwrapped[i - 1];
+            }
+            while (dp < -3.14159265f)
+            {
+                unwrapped[i] += 2.0f * 3.14159265f;
+                dp = unwrapped[i] - unwrapped[i - 1];
+            }
         }
         return unwrapped;
     }
 
-    //--------------------------------------------------------------------------
-    // Extract partials (trajectories) from spectral frames.
     struct Peak { float freq; float amp; float phase; float time; };
+
     inline std::vector<Partial> extractPartials(const std::vector<SpectralFrame>& frames,
-        float startThresh, float continueThresh, int maxGap, int maxPartialsParam)
+        float startThresh,
+        float continueThresh,
+        int maxGap,
+        int maxPartialsParam)
     {
         std::vector<std::vector<Peak>> framePeaks(frames.size());
+
         for (size_t i = 0; i < frames.size(); ++i)
         {
             const auto& sf = frames[i];
-            int nBins = static_cast<int>(sf.amplitude.size());
-            if (nBins < 1)
-                continue;
-            float maxAmp = *std::max_element(sf.amplitude.begin(), sf.amplitude.end());
+            int nBins = (int)sf.amplitude.size();
+            if (nBins < 1) continue;
+
+            float maxAmp = 0.0f;
+            for (float val : sf.amplitude)
+                if (val > maxAmp) maxAmp = val;
+
             for (int b = 0; b < nBins; ++b)
             {
                 float beta = sf.amplitude[b];
@@ -578,11 +688,14 @@ public:
                 if (beta < effThresh)
                     continue;
                 if (b > 0 && b < nBins - 1)
+                {
                     if (!(beta >= sf.amplitude[b - 1] && beta >= sf.amplitude[b + 1]))
                         continue;
+                }
                 framePeaks[i].push_back({ freq, beta, sf.phase[b], sf.timeReassign[b] });
             }
         }
+
         auto balancePeaks = [&](std::vector<Peak>& peaks) -> std::vector<Peak> {
             std::vector<Peak> low, mid, high;
             for (auto& pk : peaks)
@@ -596,12 +709,14 @@ public:
             }
             int maxLow = 4, maxMid = 8, maxHigh = 16;
             auto prune = [&](std::vector<Peak>& band, int maxCount) {
-                if (band.size() <= static_cast<size_t>(maxCount))
-                    return;
+                if ((int)band.size() <= maxCount) return;
                 std::sort(band.begin(), band.end(), [](const Peak& a, const Peak& b) { return a.amp > b.amp; });
                 band.resize(maxCount);
                 };
-            prune(low, maxLow); prune(mid, maxMid); prune(high, maxHigh);
+            prune(low, maxLow);
+            prune(mid, maxMid);
+            prune(high, maxHigh);
+
             std::vector<Peak> balanced;
             balanced.insert(balanced.end(), low.begin(), low.end());
             balanced.insert(balanced.end(), mid.begin(), mid.end());
@@ -609,16 +724,17 @@ public:
             std::sort(balanced.begin(), balanced.end(), [](const Peak& a, const Peak& b) { return a.freq < b.freq; });
             return balanced;
             };
+
         for (size_t i = 0; i < framePeaks.size(); ++i)
             framePeaks[i] = balancePeaks(framePeaks[i]);
+
         int minDuration = 3;
         std::vector<Partial> partials;
         std::vector<std::vector<bool>> used(framePeaks.size());
         for (size_t i = 0; i < framePeaks.size(); ++i)
             used[i] = std::vector<bool>(framePeaks[i].size(), false);
 
-		float freqTolerance = 15.0f;  // amount of pitch deviation allowed, 20 is standard
-
+        float freqTolerance = 15.0f;
 
         for (size_t i = 0; i < framePeaks.size(); ++i)
         {
@@ -626,26 +742,28 @@ public:
             {
                 if (used[i][j])
                     continue;
+
                 Partial part;
                 part.times.push_back(framePeaks[i][j].time);
                 part.freqs.push_back(framePeaks[i][j].freq);
                 part.amps.push_back(framePeaks[i][j].amp);
                 part.phases.push_back(framePeaks[i][j].phase);
+
                 used[i][j] = true;
                 float lastFreq = framePeaks[i][j].freq;
+
                 for (size_t k = i + 1; k < framePeaks.size(); ++k)
                 {
                     int bestIdx = -1;
                     float bestDiff = freqTolerance;
                     for (size_t m = 0; m < framePeaks[k].size(); ++m)
                     {
-                        if (used[k][m])
-                            continue;
+                        if (used[k][m]) continue;
                         float diff = std::fabs(framePeaks[k][m].freq - lastFreq);
                         if (diff < bestDiff)
                         {
                             bestDiff = diff;
-                            bestIdx = static_cast<int>(m);
+                            bestIdx = (int)m;
                         }
                     }
                     if (bestIdx != -1)
@@ -654,51 +772,67 @@ public:
                         part.freqs.push_back(framePeaks[k][bestIdx].freq);
                         part.amps.push_back(framePeaks[k][bestIdx].amp);
                         part.phases.push_back(framePeaks[k][bestIdx].phase);
+
                         used[k][bestIdx] = true;
                         lastFreq = framePeaks[k][bestIdx].freq;
                     }
                     else
                     {
-                        part.times.push_back(static_cast<float>(k * hopSize + fftSize / 2));
+                        part.times.push_back((float)(k * hopSize + fftSize / 2));
                         part.freqs.push_back(lastFreq);
                         part.amps.push_back(0.0f);
                         part.phases.push_back(0.0f);
-                        part.phases.push_back(0.0f);
                     }
                 }
-                if (static_cast<int>(part.times.size()) >= minDuration)
+
+                if ((int)part.times.size() >= minDuration)
                     partials.push_back(part);
             }
         }
+
         for (auto& part : partials)
             part.phases = unwrapPhase(part.phases);
+
         std::vector<std::pair<Partial, float>> scoredPartials;
+        scoredPartials.reserve(partials.size());
+
         for (auto& p : partials)
         {
             float score = 0.0f;
-            for (size_t i = 0; i < p.amps.size(); ++i)
-                score += p.amps[i];
+            for (float a : p.amps)
+                score += a;
             scoredPartials.push_back({ p, score });
         }
+
         std::sort(scoredPartials.begin(), scoredPartials.end(),
-            [](const std::pair<Partial, float>& a, const std::pair<Partial, float>& b) { return a.second > b.second; });
-        int finalCount = std::min(static_cast<int>(scoredPartials.size()), maxPartialsParam);
+            [](auto& a, auto& b) { return a.second > b.second; });
+
+        int finalCount = std::min((int)scoredPartials.size(), maxPartialsParam);
         std::vector<Partial> finalPartials;
+        finalPartials.reserve(finalCount);
         for (int i = 0; i < finalCount; i++)
             finalPartials.push_back(scoredPartials[i].first);
+
+        // Ensure envelope sizes
+        for (auto& p : finalPartials)
+            p.envelope.resize(p.times.size(), 1.0f);
+
         return finalPartials;
     }
 
 private:
-    //----------------------------------------------------------------------
-    // Internal FFT objects and buffers.
     juce::dsp::FFT fft;
     juce::dsp::FFT fftPadded;
+
     std::vector<float> windowTable, compositeWindow, derivWindow, timeWeightedWindow;
     std::vector<float> shortWindow, compositeShortWindow, derivShortWindow, timeWeightedShortWindow;
+
     std::array<float, fftSize> inputFifo{}, outputFifo{};
-    std::vector<float> fftData, paddedData, paddedData_time, paddedData_deriv;
+    std::vector<float> fftData;
+
+    std::vector<float> paddedData, paddedData_time, paddedData_deriv;
     std::vector<float> paddedData_short, paddedData_time_short, paddedData_deriv_short;
+
     int pos, count;
     float currentSampleRate, lowpassCutoffFrequency, additivePeakThreshold;
     int maxPartials;
@@ -706,35 +840,41 @@ private:
     float sigma, shortSigma;
     std::mt19937 randomGenerator;
 
-    //----------------------------------------------------------------------
-    // Real-time helper.
     inline void processFrame(bool bypassed)
     {
         float* fptr = fftData.data();
         reassembleFFTFrame(fptr);
+
         std::memcpy(paddedData.data(), fptr, fftSize * sizeof(float));
         std::fill(paddedData.begin() + fftSize, paddedData.end(), 0.0f);
+
         juce::FloatVectorOperations::multiply(paddedData.data(), windowTable.data(), fftSize);
+
         if (!bypassed)
         {
             fftPadded.performRealOnlyForwardTransform(paddedData.data(), true);
             fftPadded.performRealOnlyInverseTransform(paddedData.data());
         }
+
         juce::FloatVectorOperations::multiply(paddedData.data(), compositeWindow.data(), fftSize);
+
         if (pos > 0)
             juce::FloatVectorOperations::add(outputFifo.data(), paddedData.data() + fftSize - pos, pos);
+
         int remaining = fftSize - pos;
         if (remaining > 0)
             juce::FloatVectorOperations::add(outputFifo.data() + pos, paddedData.data(), remaining);
     }
+
     inline void reassembleFFTFrame(float* dest)
     {
         for (int i = 0; i < fftSize; ++i)
             dest[i] = inputFifo[(pos + i) & (fftSize - 1)];
     }
+
     inline int frequencyToBin(float frequency) const
     {
-        int bin = int((frequency * paddedSize) / currentSampleRate + 0.5f);
+        int bin = (int)((frequency * paddedSize) / currentSampleRate + 0.5f);
         if (bin >= paddedNumBins) bin = paddedNumBins - 1;
         if (bin < 0) bin = 0;
         return bin;
