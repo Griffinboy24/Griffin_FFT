@@ -1,0 +1,108 @@
+#pragma once
+
+#include <random>
+#include <memory>   // for std::unique_ptr
+#include <cmath>    // for std::sin, std::sqrt
+#include "AdditiveData.h"
+
+//--------------------------------------------------------------
+// Abstract interface for additive effects
+struct IAdditiveEffect
+{
+    virtual ~IAdditiveEffect() {}
+    virtual void processPartials(std::vector<Partial>& partials,
+        float sampleRate,
+        const AdditiveSettings& settings) = 0;
+};
+
+//--------------------------------------------------------------
+// 1) Time-stretch effect
+struct TimeStretchEffect : public IAdditiveEffect
+{
+    void processPartials(std::vector<Partial>& partials,
+        float /*sampleRate*/,
+        const AdditiveSettings& settings) override
+    {
+        for (size_t i = 0; i < partials.size(); ++i)
+        {
+            Partial& p = partials[i];
+            for (size_t n = 0; n < p.times.size(); ++n)
+                p.times[n] *= settings.timeStretchFactor;
+        }
+    }
+};
+
+//--------------------------------------------------------------
+// 2) Random panning effect
+struct RandomPanEffect : public IAdditiveEffect
+{
+    std::mt19937 rng;
+
+    RandomPanEffect()
+    {
+        std::random_device rd;
+        rng.seed(rd());
+    }
+
+    void processPartials(std::vector<Partial>& partials,
+        float /*sampleRate*/,
+        const AdditiveSettings& /*settings*/) override
+    {
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+        for (size_t i = 0; i < partials.size(); ++i)
+        {
+            Partial& p = partials[i];
+            p.spatialPosition = dist(rng);
+            // If desired, reset the envelope to 1.0 for all frames:
+            p.envelope.assign(p.times.size(), 1.0f);
+        }
+    }
+};
+
+//--------------------------------------------------------------
+// 3) Simple LFO amplitude modulation effect
+struct LfoModEffect : public IAdditiveEffect
+{
+    void processPartials(std::vector<Partial>& partials,
+        float sampleRate,
+        const AdditiveSettings& settings) override
+    {
+        float twoPi = 6.283185307f;
+        float rate = settings.lfoRateHz;
+
+        for (size_t i = 0; i < partials.size(); ++i)
+        {
+            Partial& p = partials[i];
+            p.envelope.resize(p.times.size(), 1.0f);
+
+            for (size_t n = 0; n < p.times.size(); ++n)
+            {
+                float t = p.times[n] / sampleRate;
+                p.envelope[n] = 1.0f + 0.2f * std::sin(twoPi * rate * t);
+            }
+        }
+    }
+};
+
+//--------------------------------------------------------------
+// AdditiveEffectsChain: holds multiple IAdditiveEffect objects in series
+class AdditiveEffectsChain
+{
+public:
+    void addEffect(std::unique_ptr<IAdditiveEffect> effect)
+    {
+        effects.push_back(std::move(effect));
+    }
+
+    void processPartials(std::vector<Partial>& partials,
+        float sampleRate,
+        const AdditiveSettings& settings)
+    {
+        for (auto& fx : effects)
+            fx->processPartials(partials, sampleRate, settings);
+    }
+
+private:
+    std::vector<std::unique_ptr<IAdditiveEffect>> effects;
+};
