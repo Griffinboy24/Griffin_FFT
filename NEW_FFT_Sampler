@@ -5,7 +5,7 @@
 #include <cmath>
 #include <algorithm>
 
-#include "src/AdditiveData.h"  // Still references the pass-through header
+#include "src/AdditiveData.h"
 #include "src/GriffinFFT_UL.h"
 
 namespace project
@@ -70,7 +70,7 @@ namespace project
         bool   processFFT = false;
         bool   renderSpectralFx = false;
 
-        // New effect toggles
+        // Example effect toggles
         bool enableTimeStretch = true;
         bool enableRandomPan = true;
         bool enableLfo = true;
