@@ -1,15 +1,15 @@
 #pragma once
 
 #include <vector>
-#include <random>
 #include <memory>
+#include <random>
 #include <cmath>
 
-// -------------------------
-// 1) Data Structures
-// -------------------------
+// -----------------------------------------------------------
+// 1) Data & Settings
+// -----------------------------------------------------------
 
-// Define Partial
+// Each partial track across frames
 struct Partial
 {
     std::vector<float> times;
@@ -20,20 +20,34 @@ struct Partial
     float spatialPosition = 0.5f;
 };
 
-// Define AdditiveSettings
+// Settings controlling which effects to enable, plus any effect parameters
 struct AdditiveSettings
 {
+    // Booleans for the existing "factory" effects
     bool enableTimeStretch = true;
     bool enableRandomPan = true;
     bool enableLfoMod = true;
 
-    float timeStretchFactor = 2.0f; // For time stretch
-    float lfoRateHz = 0.5f; // For LFO effect
+    // Example parameters
+    float timeStretchFactor = 2.0f;
+    float lfoRateHz = 0.5f;
+
+    // -------------------------------------------------------
+    // If you add a new effect, e.g. "PhaserEffect", you might do:
+    //
+    // bool enablePhaser = false;
+    // float phaserDepth = 0.7f;
+    //
+    // Then in createEffectsChain() below, you add:
+    //
+    // if(settings.enablePhaser)
+    //     chain.addEffect(std::make_unique<PhaserEffect>());
+    // -------------------------------------------------------
 };
 
-// -------------------------
-// 2) Effect Interface
-// -------------------------
+// -----------------------------------------------------------
+// 2) Base Interface
+// -----------------------------------------------------------
 struct IAdditiveEffect
 {
     virtual ~IAdditiveEffect() {}
@@ -42,11 +56,10 @@ struct IAdditiveEffect
         const AdditiveSettings& settings) = 0;
 };
 
-// -------------------------
+// -----------------------------------------------------------
 // 3) Concrete Effects
-// -------------------------
+// -----------------------------------------------------------
 
-// a) TimeStretchEffect
 struct TimeStretchEffect : public IAdditiveEffect
 {
     void processPartials(std::vector<Partial>& partials,
@@ -61,7 +74,6 @@ struct TimeStretchEffect : public IAdditiveEffect
     }
 };
 
-// b) RandomPanEffect
 struct RandomPanEffect : public IAdditiveEffect
 {
     std::mt19937 rng;
@@ -77,17 +89,15 @@ struct RandomPanEffect : public IAdditiveEffect
         const AdditiveSettings& /*settings*/) override
     {
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-
         for (auto& p : partials)
         {
             p.spatialPosition = dist(rng);
-            // Optionally reset the envelope to 1.0 for each partial
+            // Optionally reset envelope if desired
             p.envelope.assign(p.times.size(), 1.0f);
         }
     }
 };
 
-// c) LfoModEffect
 struct LfoModEffect : public IAdditiveEffect
 {
     void processPartials(std::vector<Partial>& partials,
@@ -100,19 +110,19 @@ struct LfoModEffect : public IAdditiveEffect
         for (auto& p : partials)
         {
             p.envelope.resize(p.times.size(), 1.0f);
-
-            for (size_t n = 0; n < p.times.size(); ++n)
+            for (size_t i = 0; i < p.times.size(); ++i)
             {
-                float t = p.times[n] / sampleRate;
-                p.envelope[n] = 1.0f + 0.2f * std::sin(twoPi * rate * t);
+                float t = p.times[i] / sampleRate;
+                p.envelope[i] = 1.0f + 0.2f * std::sin(twoPi * rate * t);
             }
         }
     }
 };
 
-// -------------------------
-// 4) Chain
-// -------------------------
+// -----------------------------------------------------------
+// 4) Effects Chain & Factory
+// -----------------------------------------------------------
+
 class AdditiveEffectsChain
 {
 public:
@@ -132,3 +142,25 @@ public:
 private:
     std::vector<std::unique_ptr<IAdditiveEffect>> effects;
 };
+
+// Single helper to build the chain from AdditiveSettings.
+// You only need to modify this if you add a new effect class.
+inline AdditiveEffectsChain createEffectsChain(const AdditiveSettings& settings)
+{
+    AdditiveEffectsChain chain;
+
+    if (settings.enableTimeStretch)
+        chain.addEffect(std::make_unique<TimeStretchEffect>());
+
+    if (settings.enableRandomPan)
+        chain.addEffect(std::make_unique<RandomPanEffect>());
+
+    if (settings.enableLfoMod)
+        chain.addEffect(std::make_unique<LfoModEffect>());
+
+    // Example of adding more effects if you define them.
+    // if(settings.enablePhaser)
+    //     chain.addEffect(std::make_unique<PhaserEffect>());
+
+    return chain;
+}
